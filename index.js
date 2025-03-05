@@ -1,9 +1,11 @@
-const WebSocket = require('ws');
+const express = require('express');
 const axios = require('axios');
+const cors = require('cors');
 require('dotenv').config();
 
-const wss = new WebSocket.Server({ port: 5001 });
-console.log('WebSocket server running on port 5001');
+const app = express();
+app.use(cors());
+app.use(express.json());
 
 const LANGUAGE_IDS = {
   c: 50,
@@ -18,57 +20,52 @@ const JUDGE0_HEADERS = {
   'X-RapidAPI-Host': 'judge0-ce.p.rapidapi.com',
 };
 
-wss.on('connection', (ws) => {
-  console.log('New client connected');
+// Submit code to Judge0
+app.post('/submit', async (req, res) => {
+  const { code, language, input } = req.body;
+  const languageId = LANGUAGE_IDS[language];
 
-  ws.on('message', async (message) => {
-    try {
-      const { code, language, input } = JSON.parse(message);
-      const languageId = LANGUAGE_IDS[language];
-      
-      const { data: submission } = await axios.post(
-        'https://judge0-ce.p.rapidapi.com/submissions',
-        {
-          source_code: code,
-          language_id: languageId,
-          stdin: input,
-          redirect_stderr_to_stdout: true
-        },
-        { headers: JUDGE0_HEADERS }
-      );
+  try {
+    const { data: submission } = await axios.post(
+      'https://judge0-ce.p.rapidapi.com/submissions',
+      {
+        source_code: code,
+        language_id: languageId,
+        stdin: input,
+        redirect_stderr_to_stdout: true,
+      },
+      { headers: JUDGE0_HEADERS }
+    );
 
-      const pollResult = async () => {
-        try {
-          const { data: result } = await axios.get(
-            `https://judge0-ce.p.rapidapi.com/submissions/${submission.token}`,
-            { headers: JUDGE0_HEADERS }
-          );
+    res.json({ token: submission.token });
+  } catch (error) {
+    console.error('Submission error:', error);
+    res.status(500).json({ error: 'Failed to submit code' });
+  }
+});
 
-          if (result.status.id <= 2) { // In queue or processing
-            setTimeout(pollResult, 2000);
-          } else {
-            const output = result.stdout || result.stderr || result.message;
-            ws.send(JSON.stringify({ output }));
-          }
-        } catch (error) {
-          ws.send(JSON.stringify({ error: 'Error fetching result' }));
-        }
-      };
+// Poll Judge0 for result
+app.get('/result/:token', async (req, res) => {
+  const { token } = req.params;
 
-      pollResult();
-    } catch (error) {
-      console.error('Error:', error);
-      ws.send(JSON.stringify({ 
-        error: error.response?.data?.error || 'Server error' 
-      }));
+  try {
+    const { data: result } = await axios.get(
+      `https://judge0-ce.p.rapidapi.com/submissions/${token}`,
+      { headers: JUDGE0_HEADERS }
+    );
+
+    if (result.status.id <= 2) { // In queue or processing
+      res.json({ status: 'processing' });
+    } else {
+      res.json({ output: result.stdout || result.stderr, status: 'completed' });
     }
-  });
+  } catch (error) {
+    console.error('Polling error:', error);
+    res.status(500).json({ error: 'Failed to fetch result' });
+  }
+});
 
-  ws.on('close', () => {
-    console.log('Client disconnected');
-  });
-
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-  });
+const PORT = process.env.PORT || 5001;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
